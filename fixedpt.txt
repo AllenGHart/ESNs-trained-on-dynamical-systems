@@ -1,0 +1,3 @@
+function y = fixedpt(r,A,Win,Wout,b)
+    y = r - tanh(A*r +Win*Wout*r + b);
+end

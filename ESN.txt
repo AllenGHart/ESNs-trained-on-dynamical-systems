@@ -1,0 +1,235 @@
+clear
+
+%set seed
+rng(100)
+
+%State activation function
+activation = @tanh;
+
+%Solve Lorenz system numerically
+sigma = 10;
+beta = 8/3;
+rho = 28;
+initial = [1, 1, 1];
+Tmax = 300;
+Tmin = 0;
+time_period = [Tmin Tmax];
+f = @(t,a) [-sigma*a(1) + sigma*a(2); rho*a(1) - a(2) - a(1)*a(3); -beta*a(3) + a(1)*a(2)];
+[t,a] = ode45(f,time_period,initial);     % Runge-Kutta 4th/5th order ODE solver
+[n,~] = size(a);
+
+%Create trajectory of equally spaced x-points
+u = zeros(n,1);
+xq = linspace(0,Tmax - Tmin,n);
+F = griddedInterpolant(t,a(:,1),'spline');
+u(:,1) = F(xq);
+F = griddedInterpolant(t,a(:,2),'spline');
+u(:,2) = F(xq);
+F = griddedInterpolant(t,a(:,3),'spline');
+u(:,3) = F(xq);
+
+u = u';
+step = (Tmax-Tmin)/n;
+
+%State ESN params
+Dr = 300;
+gamma = 1e-6;
+burn_in = round(n/2);
+sigma = 0.1;
+mean_d = 6;
+rho = 1.0;
+b = 0;
+
+%Set things up
+A=(rand(Dr,Dr)<mean_d/Dr).*(rand(Dr,Dr)-0.5); % random input connections
+A = (rho/norm(abs(A)) ) * A;
+A = sparse(A);
+Win = sigma*(rand(Dr,1) - 0.5);
+[~,q] = size(u);
+r = zeros(Dr,q);
+r(:,1) = zeros(Dr,1);
+
+%Train ESN#
+for i = 1 : q - 1
+    r(:,i+1) = activation(A*r(:,i) + Win*u(1,i) + b);
+end
+
+%Burn out the first half of the reservoir states
+u(:,1:burn_in) = [];
+r(:,1:burn_in) = [];
+[~,q] = size(u);
+
+%Compute Wout
+[U , S, V]          =  svd(r');
+s                   =  diag(S);
+Wout = zeros(Dr,1);
+for k = 1 : Dr
+   Wout(:,1) = Wout(:,1) + V(:,k) * ( ( s(k)*dot(U(:,k),u(1,:)) ) / ( s(k)^2 + gamma^2) );
+end
+
+Wout = Wout';
+
+%Compute some summary statistics
+learned = Wout*r;
+residual = learned - u(1,:);
+res_std = std(residual);
+res_mean = mean(residual);
+
+%Find the fixed point in the reservoir dynamics
+max_iter = 10;
+x(:,1) = r(:,2000);
+for k = 1 : max_iter-1
+   J = Jacobian(x(:,k),Dr,A,Win,Wout,b);
+   x (:,k+1) = J \ (J*x(:,k) - fixedpt(x(:,k),A,Win,Wout,b) ); 
+end
+
+y = V'*x;
+
+%Compute the future trajectory of the reservoir dynamics
+N = length(u(1,:));
+r_new = zeros(Dr,N+1);
+r_new(:,1) = r(:,q);
+v = zeros(1,N);
+for i = 1 : N
+    v(:,i) = Wout*r_new(:,i);
+    r_new(:,i+1) = activation(A*r_new(:,i) + Win*v(:,i) + b);
+end
+
+%Project the reservoir dynamics onto the first 3 principal components
+princ_comps = V; 
+proj = zeros(3 , q );
+proj_new = zeros(3 , N+1 );
+for j = 1 : 3
+    for i = 1 : q
+        proj(j,i) =  dot( r(:,i) , princ_comps(:,j) );
+    end
+    for i = 1 : N + 1
+        proj_new(j,i) = dot( r_new(:,i) , princ_comps(:,j) );
+    end
+end
+
+%reset Lorenz parameters
+sigma = 10;
+beta = 8/3;
+rho = 28;
+number_of_Lyapunov_points=5000;
+
+%Compute the Lyapunov exponents
+J2 = Jacobian_Lyapunov(r_new(:,i),A,Win,Wout,b);
+[Q,R] = qr(J2);
+x = log(abs(diag(R)));
+X = zeros(Dr,number_of_Lyapunov_points);
+
+J3 = exp( step * [-sigma, sigma, 0; rho - u(3,1), -1, -u(1,1); u(2,1), u(1,1), -beta]);
+[Q3,R3] = qr(J3);
+x3 = log(abs(diag(R3)));
+X3 = zeros(3,number_of_Lyapunov_points);
+
+for i = 2 : number_of_Lyapunov_points
+    J2 = Jacobian_Lyapunov(r_new(:,i),A,Win,Wout,b);
+    [Q,R] = qr(J2 * Q);
+    x = log(abs(diag(R))) + x;
+    X(:,i) = x/(i*step);
+    
+    J3 = eye(3) + step * [-sigma, sigma, 0; rho - u(3,i), -1, -u(1,i); u(2,i), u(1,i), -beta];
+    [Q3,R3] = qr(J3 * Q3);
+    x3 = log(abs(diag(R3))) + x3;
+    X3(:,i) = x3/(i*step);
+end
+x = x / (number_of_Lyapunov_points*step);
+x3 = x3 / (number_of_Lyapunov_points*step);
+
+%Plot the observed x-values and predicted values
+figure 
+set(gca,'fontsize',14)
+plot((q-1)*step:step:(q-1)*step+(N-1)*step,v(1,:)','r')
+hold on
+plot(0:step:(q-1)*step,u(1,:),'b')
+xlabel('time')
+ylabel('x')
+xlim([Tmax/2 - 25,Tmax/2 + 25])
+
+%plot the ESN eigenvalues together with Lorenz eigenvalues
+[eigenvectors,eigenvalues] = eig(eye(Dr) - J);
+eigenvalues = diag(eigenvalues);
+
+sigma = 10;
+beta = 8/3;
+rho = 28;
+J_L = [-sigma, sigma, 0; 1, -1, -sqrt(beta*(rho-1)); sqrt(beta*(rho-1)), sqrt(beta*(rho-1)), -beta];
+eig_L = exp(step*eig(J_L));
+
+figure 
+hold on
+set(gca,'fontsize',14)
+plot(eigenvalues,'r .','Markersize',20)
+plot(eig_L,'b x','Markersize',15,'LineWidth',2)
+xlabel('Real')
+ylabel('Imaginary')
+th = 0:pi/50:2*pi;
+xunit = cos(th);
+yunit = sin(th);
+plot(xunit, yunit, 'black');
+xunit = 0.5*cos(th);
+yunit = 0.5*sin(th);
+plot(xunit, yunit,'black');
+legend('ESN autonomous sytem','Lorenz system')
+
+% Plot the reservoir dynamics
+figure
+hold on
+set(gca,'fontsize',14)
+plot3(proj(1,:),proj(2,:),proj(3,:),'b')
+plot3(proj_new(1,:),proj_new(2,:),proj_new(3,:),'r')
+plot3(y(1,:),y(2,:),y(3,:),'black','Linewidth',1)
+legend('Training Data','Future Prediction','Newton Iterates')
+
+%Plot the Lyapunov exponents
+Lorenz_exponents(1,:) = 0.906 * ones(1,number_of_Lyapunov_points);
+Lorenz_exponents(2,:) = 0 * ones(1,number_of_Lyapunov_points);
+Lorenz_exponents(3,:) = -14.572 * ones(1,number_of_Lyapunov_points);
+
+figure
+hold on
+set(gca,'fontsize',14)
+plot(X')
+plot(Lorenz_exponents' , '--black')
+ylim([-20,10])
+xlabel('iterate')
+
+%Plot the invariant measure of the ESN future observations
+figure
+set(gca,'fontsize',14)
+histogram(v','Normalization', 'pdf','FaceColor', 'red')
+xlabel('x')
+
+%Plot the invariant measure of the Lorenz system observations
+figure
+set(gca,'fontsize',14)
+histogram( (u(1,:) )', 'Normalization', 'pdf','FaceColor', 'blue')
+xlabel('x')
+
+%Plot the convergence of the mean ESN future predictions and Lornez x-observations 
+mean_over_timeu = zeros(1,N);
+mean_over_timev = zeros(1,N);
+
+for i = 2 : N
+    u_trunc = u;
+    u_trunc(:,i:N) = [];
+    mean_over_timeu(i) = mean(u_trunc(1,:));
+    v_trunc = v;
+    v_trunc(:,i:N) = [];
+    mean_over_timev(i) = mean(v_trunc(1,:));
+end
+
+figure 
+set(gca,'fontsize',14)
+plot(0:step:(q-1)*step,mean_over_timeu,'b')
+hold on
+plot(0:step:(q-1)*step,mean_over_timev,'r')
+xlabel('time')
+ylabel('time average')
+ylim([-2,6])
+xlim([0,Tmax/2])
+
+hold off

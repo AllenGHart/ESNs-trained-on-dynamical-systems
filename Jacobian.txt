@@ -1,0 +1,5 @@
+function J = Jacobian(r,Dr,A,Win,Wout,b)
+Woutr = Wout*r;
+G = A*r + Win*Woutr + b;
+J = eye(Dr) - diag(sech(G).^2)*( A + Win*Wout );
+end
